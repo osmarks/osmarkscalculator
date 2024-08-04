@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use anyhow::{Result, anyhow, Context};
 use std::fmt;
 use inlinable_string::{InlinableString, StringExt};
@@ -22,12 +21,12 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
     for (index, char) in input.chars().enumerate() {
         state = match (char, state) {
             // if digit seen, switch into number state (and commit existing one if relevant)
-            ('0'..='9', LexState::None) => LexState::Number(char_to_string(char)),
-            ('0'..='9', LexState::Identifier(s)) => {
+            ('0'..='9' | '.', LexState::None) => LexState::Number(char_to_string(char)),
+            ('0'..='9' | '.', LexState::Identifier(s)) => {
                 toks.push(Token::Identifier(s));
                 LexState::Number(char_to_string(char))
             },
-            ('0'..='9', LexState::Number(mut n)) => {
+            ('0'..='9' | '.', LexState::Number(mut n)) => {
                 n.push(char);
                 LexState::Number(n)
             },
@@ -79,13 +78,15 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
 
 #[derive(Debug)]
 pub enum ParseError {
-    Invalid(Token)
+    Invalid(Token),
+    FloatConversion
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::Invalid(tok) => write!(f, "invalid token {:?}", tok)
+            ParseError::Invalid(tok) => write!(f, "invalid token {:?}", tok),
+            ParseError::FloatConversion => write!(f, "invalid float")
         }
     }
 }
@@ -148,9 +149,12 @@ impl Parser {
                 res
             },
             Token::Number(n) => {
-                let x = i128::from_str(&n).unwrap();
                 self.advance();
-                Ast::Num(x)
+                if let Some(i) = n.parse::<i128>().ok() {
+                    Ast::Integer(i)
+                } else {
+                    Ast::Float(n.parse::<f64>().map_err(|_| ParseError::FloatConversion)?)
+                }
             },
             Token::Identifier(s) => {
                 self.advance();
@@ -208,7 +212,8 @@ pub fn parse(t: Vec<Token>) -> Result<Ast> {
 
 #[derive(Debug)]
 pub enum Ast {
-    Num(i128),
+    Float(f64),
+    Integer(i128),
     Identifier(InlinableString),
     Op(char, Box<Ast>, Box<Ast>),
     Call(Box<Ast>, Vec<Ast>)

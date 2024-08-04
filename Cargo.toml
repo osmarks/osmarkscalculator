@@ -19,6 +19,7 @@ inlinable_string = "0.1"
 itertools = "0.10"
 wasm-bindgen = "0.2.63"
 wee_alloc = "0.4.5"
+seahash = "4"
 
 [profile.release]
 opt-level = "s"

@@ -1,6 +1,6 @@
 use inlinable_string::{InlinableString, StringExt};
 use std::hash::{Hash, Hasher};
-use std::collections::{hash_map::DefaultHasher, HashSet, HashMap};
+use std::collections::{HashSet, HashMap};
 use std::fmt::{self, Write};
 use itertools::Itertools;
 use anyhow::{Result, anyhow};
@@ -8,10 +8,12 @@ use anyhow::{Result, anyhow};
 use crate::parse::{Ast, precedence};
 use crate::env::{Env, Bindings};
 use crate::util::char_to_string;
+use crate::interval_arithmetic::Interval;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone, Hash)]
 pub enum Value {
-    Num(i128),
+    Num(Interval),
+    ExactNum(i128),
     Call(InlinableString, Vec<Value>),
     Identifier(InlinableString),
 }
@@ -27,7 +29,8 @@ impl Value {
                     _ => unimplemented!()
                 }, args.into_iter().map(Value::from_ast).collect())
             },
-            Ast::Num(n) => Value::Num(n),
+            Ast::Integer(n) => Value::ExactNum(n),
+            Ast::Float(i) => Value::Num(Interval::from_float(i)),
             Ast::Identifier(i) => Value::Identifier(i)
         }
     }
@@ -35,7 +38,7 @@ impl Value {
     // Gets the hash of a Value
     pub fn get_hash(&self) -> u64 {
         // according to https://doc.rust-lang.org/std/collections/hash_map/struct.DefaultHasher.html, all instances created here are guaranteed to be the same
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = seahash::SeaHasher::new();
         self.hash(&mut hasher);
         hasher.finish()
     }
@@ -54,6 +57,7 @@ impl Value {
         fn go(v: &Value, bindings: &mut Bindings, counter: &mut usize) -> Value {
             match v {
                 Value::Num(_) => v.clone(),
+                Value::ExactNum(_) => v.clone(),
                 Value::Identifier(name) => {
                     match bindings.get(name) {
                         Some(id) => id.clone(),
@@ -144,10 +148,18 @@ impl Value {
     }
 
     // Ensure that a value is a number, returning an error otherwise.
-    pub fn assert_num(&self, ctx: &'static str) -> Result<i128> {
+    pub fn assert_num(&self, ctx: &'static str) -> Result<Interval> {
         match self {
             Value::Num(n) => Ok(*n),
+            Value::ExactNum(n) => Ok(Interval::from_float(*n as f64)),
             _ => Err(anyhow!("expected number, got {:?}", self).context(ctx))
+        }
+    }
+
+    pub fn assert_exact_num(&self, ctx: &'static str) -> Result<i128> {
+        match self {
+            Value::ExactNum(n) => Ok(*n),
+            _ => Err(anyhow!("expected exact number, got {:?}", self).context(ctx))
         }
     }
 
@@ -163,7 +175,8 @@ impl Value {
         fn go<W: fmt::Write>(v: &Value, parent_prec: Option<usize>, env: &Env, f: &mut W) -> fmt::Result {
             match v {
                 // As unary - isn't parsed, negative numbers are written with Negate instead.
-                Value::Num(x) => if *x >= 0 {
+                Value::Num(x) => write!(f, "{}", x),
+                Value::ExactNum(x) => if *x >= 0 {
                     write!(f, "{}", x)
                 } else { write!(f, "Negate[{}]", -x) },
                 Value::Identifier(i) => write!(f, "{}", i),

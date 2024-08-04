@@ -1,9 +1,12 @@
+#![feature(float_next_up_down)]
+
 use anyhow::{Result, Context, bail};
 use inlinable_string::InlinableString;
-use std::collections::HashMap;
+use interval_arithmetic::Interval;
+use std::{collections::HashMap, convert::TryInto};
 use std::borrow::Cow;
-use std::convert::TryInto;
 use std::sync::Arc;
+#[cfg(target_family="wasm")]
 use wasm_bindgen::prelude::*;
 
 #[global_allocator]
@@ -13,6 +16,7 @@ mod parse;
 mod value;
 mod util;
 mod env;
+mod interval_arithmetic;
 
 use value::Value;
 use env::{Rule, Ruleset, Env, Bindings, RuleResult, Operation};
@@ -36,7 +40,7 @@ fn match_and_bind(expr: &Value, rule: &Rule, env: &Env) -> Result<Option<Value>>
                         // "Num" predicate matches successfully if something is a number
                         Value::Identifier(i) if i.as_ref() == "Num" => {
                             match val {
-                                Value::Num(_) => (),
+                                Value::Num(_) | Value::ExactNum(_) => (),
                                 _ => success = false
                             }
                         },
@@ -190,7 +194,7 @@ fn match_and_bind(expr: &Value, rule: &Rule, env: &Env) -> Result<Option<Value>>
 fn canonical_sort(v: &mut Value, env: &Env) -> Result<()> {
     match v {
         Value::Call(head, args) => if env.get_op(head).commutative {
-            args.sort();
+            args.sort_by(|a, b| a.get_hash().cmp(&b.get_hash()));
         },
         _ => ()
     }
@@ -215,7 +219,7 @@ fn flatten_tree(v: &mut Value, env: &Env) -> Result<()> {
                     }
                     match move_pos {
                         Some(pos) => {
-                            let removed = std::mem::replace(&mut args[pos], Value::Num(0));
+                            let removed = std::mem::replace(&mut args[pos], Value::Identifier(InlinableString::from("")));
                             // We know that removed will be a Call (because its head wasn't None earlier). Unfortunately, rustc does not know this.
                             match removed {
                                 Value::Call(_, removed_child_args) => args.splice(pos..=pos, removed_child_args.into_iter()),
@@ -285,11 +289,22 @@ fn run_rewrite(v: &mut Value, env: &Env) -> Result<()> {
 
 // Utility function for defining intrinsic functions for binary operators.
 // Converts a function which does the actual operation to a function from bindings to a value.
-fn wrap_binop<F: 'static + Fn(i128, i128) -> Result<i128> + Sync + Send>(op: F) -> Box<dyn Fn(&Bindings) -> Result<Value> + Sync + Send> {
+fn wrap_binop<F: 'static + Fn(Interval, Interval) -> Result<Interval> + Sync + Send, G: 'static + Fn(i128, i128) -> Result<i128> + Sync + Send>(op: F, op_exact: G) -> Box<dyn Fn(&Bindings) -> Result<Value> + Sync + Send> {
     Box::new(move |bindings: &Bindings| {
-        let a = bindings.get(&InlinableString::from("a")).context("binop missing first argument")?.assert_num("binop first argument")?;
-        let b = bindings.get(&InlinableString::from("b")).context("binop missing second argument")?.assert_num("binop second argument")?;
-        op(a, b).map(Value::Num)
+        let a = bindings.get(&InlinableString::from("a")).context("binop missing first argument")?;
+        let b = bindings.get(&InlinableString::from("b")).context("binop missing second argument")?;
+        match (a, b) {
+            (Value::ExactNum(a), Value::ExactNum(b)) => op_exact(*a, *b).map(Value::ExactNum),
+            _ => op(a.assert_num("binop first argument")?, b.assert_num("binop second argument")?).map(Value::Num)
+        }
+    })
+}
+
+fn wrap_binop_no_exact<F: 'static + Fn(Interval, Interval) -> Result<Interval> + Sync + Send>(op: F) -> Box<dyn Fn(&Bindings) -> Result<Value> + Sync + Send> {
+    Box::new(move |bindings: &Bindings| {
+        let a = bindings.get(&InlinableString::from("a")).context("binop missing first argument")?;
+        let b = bindings.get(&InlinableString::from("b")).context("binop missing second argument")?;
+        op(a.assert_num("binop first argument")?, b.assert_num("binop second argument")?).map(Value::Num)
     })
 }
 
@@ -305,14 +320,11 @@ fn make_initial_env() -> Env {
     ops.insert(InlinableString::from("#"), Operation { commutative: false, associative: true });
     let ops = Arc::new(ops);
     let mut intrinsics = HashMap::new();
-    intrinsics.insert(0, wrap_binop(|a, b| a.checked_add(b).context("integer overflow")));
-    intrinsics.insert(1, wrap_binop(|a, b| a.checked_sub(b).context("integer overflow")));
-    intrinsics.insert(2, wrap_binop(|a, b| a.checked_mul(b).context("integer overflow")));
-    intrinsics.insert(3, wrap_binop(|a, b| a.checked_div(b).context("division by zero")));
-    intrinsics.insert(4, wrap_binop(|a, b| {
-        // The "pow" function takes a usize (machine-sized unsigned integer) and an i128 may not fit into this, so an extra conversion is needed
-        Ok(a.pow(b.try_into()?))
-    }));
+    intrinsics.insert(0, wrap_binop(|a, b| Ok(a + b), |a, b| Ok(a + b)));
+    intrinsics.insert(1, wrap_binop(|a, b| Ok(a - b), |a, b| Ok(a - b)));
+    intrinsics.insert(2, wrap_binop(|a, b| Ok(a * b), |a, b| Ok(a * b)));
+    intrinsics.insert(3, wrap_binop_no_exact(|a, b| Ok(a / b)));
+    intrinsics.insert(4, wrap_binop(|a, b| a.pow(b), |a, b| a.checked_pow(b.try_into()?).context("integer overflow")));
     intrinsics.insert(5, Box::new(|bindings| {
         // Substitute a single, given binding var=value into a target expression
         let var = bindings.get(&InlinableString::from("var")).unwrap();
@@ -323,7 +335,7 @@ fn make_initial_env() -> Env {
         new_bindings.insert(name, value.clone());
         Ok(target.subst(&new_bindings))
     }));
-    intrinsics.insert(6, wrap_binop(|a, b| a.checked_rem(b).context("division by zero")));
+    //intrinsics.insert(6, wrap_binop(|a, b| a.checked_rem(b).context("division by zero")));
     let intrinsics = Arc::new(intrinsics);
     Env {
         ruleset: vec![],
@@ -341,7 +353,6 @@ a#Num * b#Num = Intrinsic[2]
 a#Num / b#Num = Intrinsic[3]
 a#Num ^ b#Num = Intrinsic[4]
 Subst[var=value, target] = Intrinsic[5]
-Mod[a#Num, b#Num] = Intrinsic[6]
 PushRuleset[builtins]
 ";
 
@@ -440,7 +451,7 @@ impl ImperativeCtx {
     // Insert a rule into the current ruleset; handles switching out the result for a relevant intrinsic use, generating possible reorderings, and inserting into the lookup map.
     fn insert_rule(&mut self, condition: &Value, result_val: Value) -> Result<()> {
         let result = match result_val {
-            Value::Call(head, args) if head == "Intrinsic" => RuleResult::Intrinsic(args[0].assert_num("Intrinsic ID")? as usize),
+            Value::Call(head, args) if head == "Intrinsic" => RuleResult::Intrinsic(args[0].assert_num("Intrinsic ID")?.round_to_int()),
             _ => RuleResult::Exp(result_val)
         };
         for rearrangement in condition.pattern_reorderings(&self.base_env).into_iter() {
@@ -477,7 +488,7 @@ impl ImperativeCtx {
                     },
                     // Rebinding numbers can only bring confusion, so it is not allowed.
                     // They also do not have a head, and so cannot be inserted into the ruleset anyway.
-                    Value::Num(_) => bail!("You cannot rebind numbers")
+                    Value::Num(_) | Value::ExactNum(_) => bail!("You cannot rebind numbers")
                 }
             },
             // SetStage[] calls set the stage the current ruleset will be applied at
@@ -557,14 +568,17 @@ impl ImperativeCtx {
     }
 }
 
+#[cfg(target_family="wasm")]
 static mut JS_CONTEXT: Option<ImperativeCtx> = None;
 
+#[cfg(target_family="wasm")]
 #[wasm_bindgen]
 pub fn init_context() {
     unsafe {
         JS_CONTEXT = Some(ImperativeCtx::init());
     }
 }
+#[cfg(target_family="wasm")]
 unsafe fn load_defaults_internal() -> Result<()> {
     let ctx = (&mut JS_CONTEXT).as_mut().unwrap();
     ctx.eval_program(BUILTINS)?;
@@ -575,12 +589,14 @@ unsafe fn load_defaults_internal() -> Result<()> {
     ctx.eval_program(DIFFERENTIATION_DEFINITION)?;
     Ok(())
 }
+#[cfg(target_family="wasm")]
 #[wasm_bindgen]
 pub fn load_defaults() {
     unsafe {
         load_defaults_internal().unwrap();
     }
 }
+#[cfg(target_family="wasm")]
 #[wasm_bindgen]
 pub fn run_program(program: &str) -> String {
     unsafe {
@@ -592,6 +608,7 @@ pub fn run_program(program: &str) -> String {
         }
     }
 }
+#[cfg(target_family="wasm")]
 #[wasm_bindgen]
 pub fn deinit_context() {
     unsafe {
@@ -628,9 +645,6 @@ mod test {
             ("a = 7
             b = Negate[4] 
             a + b", "3"),
-            ("IsEven[x] = 0
-            IsEven[x#Eq[Mod[x, 2], 0]] = 1
-            IsEven[3] - IsEven[4]", "Negate[1]"),
             ("(a+b+c)^2", "2*a*b+2*a*c+2*b*c+a^2+b^2+c^2"),
             ("(x+2)^7", "128+2*x^6+12*x^5+12*x^6+16*x^3+16*x^5+24*x^4+24*x^5+32*x^2+32*x^3+32*x^5+128*x^2+256*x^4+448*x+512*x^2+512*x^3+x^7")
         ];
