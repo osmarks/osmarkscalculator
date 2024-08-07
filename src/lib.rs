@@ -434,6 +434,7 @@ x^n/x = x^(n-1)
 PushRuleset[factor_postpostprocess]
 ";
 
+#[derive(Clone)]
 pub struct ImperativeCtx {
     bindings: Bindings,
     current_ruleset_stage: InlinableString,
@@ -667,14 +668,14 @@ mod test {
             ("(x+2)^7", "128+2*x^6+12*x^5+12*x^6+16*x^3+16*x^5+24*x^4+24*x^5+32*x^2+32*x^3+32*x^5+128*x^2+256*x^4+448*x+512*x^2+512*x^3+x^7")
         ];
         for (input, expected_result) in test_cases {
-            let lhs = ctx.eval_program(input).unwrap();
+            let lhs = ctx.clone().eval_program(input).unwrap();
             let lhs = lhs.as_ref().unwrap().render_to_string(&ctx.base_env);
             println!("{} evaluated to {}; expected {}", input, lhs, expected_result);
             assert_eq!(lhs, expected_result);   
         }
 
         let error_cases = [
-            ("1/0")
+            ("+"),
         ];
 
         for error_case in error_cases {
