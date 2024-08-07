@@ -87,11 +87,11 @@ impl Interval {
         Ok((rhs * self.ln()?).exp())
     }
 
-    pub fn round_to_int(&self) -> usize {
+    pub fn round_to_int(&self) -> i128 {
         let a = self.0.round();
         let b = self.1.round();
         if a == b {
-            a as usize
+            a as i128
         } else {
             panic!("interval not a single integer")
         }

@@ -27,6 +27,7 @@ fn match_and_bind(expr: &Value, rule: &Rule, env: &Env) -> Result<Option<Value>>
         match (expr, cond) {
             // numbers match themselves
             (Value::Num(a), Value::Num(b)) => if a == b { Ok(Some(HashMap::new())) } else { Ok(None) },
+            (Value::ExactNum(a), Value::ExactNum(b)) => if a == b { Ok(Some(HashMap::new())) } else { Ok(None) },
             // handle predicated value - check all predicates, succeed with binding if they match
             (val, Value::Call(x, args)) if x == "#" => {
                 let preds = &args[1..];
@@ -331,6 +332,12 @@ fn run_intrinsic(id: usize, args: &HashMap<InlinableString, Value>) -> Result<Va
             Ok(target.subst(&new_bindings))
         },
         6 => wrap_binop(|_a, _b| bail!("no modulo on floats yet"), |a, b| a.checked_rem(b).context("division by zero"))(args),
+        7 => Ok(Value::ExactNum(args.get(&InlinableString::from("a")).context("round missing first argument")?.assert_num("abs")?.round_to_int())),
+        8 => {
+            let a = args.get(&InlinableString::from("a")).context("interval missing first argument")?;
+            let b = args.get(&InlinableString::from("b")).context("interval missing second argument")?;
+            Ok(Value::Num(Interval(a.assert_num("interval first argument")?.0, b.assert_num("interval second argument")?.1)))
+        }
         _ => bail!("invalid intrinsic id {}", id)
     }
 }
@@ -363,6 +370,8 @@ a#Num * b#Num = Intrinsic[2]
 a#Num / b#Num = Intrinsic[3]
 a#Num ^ b#Num = Intrinsic[4]
 Subst[var=value, target] = Intrinsic[5]
+Round[a#Num] = Intrinsic[7]
+Interval[a#Num, b#Num] = Intrinsic[8]
 PushRuleset[builtins]
 ";
 
@@ -460,7 +469,7 @@ impl ImperativeCtx {
     // Insert a rule into the current ruleset; handles switching out the result for a relevant intrinsic use, generating possible reorderings, and inserting into the lookup map.
     fn insert_rule(&mut self, condition: &Value, result_val: Value) -> Result<()> {
         let result = match result_val {
-            Value::Call(head, args) if head == "Intrinsic" => RuleResult::Intrinsic(args[0].assert_num("Intrinsic ID")?.round_to_int()),
+            Value::Call(head, args) if head == "Intrinsic" => RuleResult::Intrinsic(args[0].assert_num("Intrinsic ID")?.round_to_int() as usize),
             _ => RuleResult::Exp(result_val)
         };
         for rearrangement in condition.pattern_reorderings(&self.base_env).into_iter() {
@@ -644,17 +653,17 @@ mod test {
             ("Negate[a+b]", "Negate[1]*b-a"),
             ("Subst[x=4, x+4+4+4+4]", "20"),
             ("(a+b)*(c+d)*(e+f)", "a*c*e+a*c*f+a*d*e+a*d*f+b*c*e+b*c*f+b*d*e+b*d*f"),
-            ("(12+55)^3-75+16/(2*2)+5+3*4", "300709"),
+            ("Round[(12+55)^3-75+16/(2*2)+5+3*4]", "300709"),
             ("D[3*x^3 + 6*x, x] ", "6+9*x^2"),
             ("Fib[n] = Fib[n-1] + Fib[n-2] 
             Fib[0] = 0 
             Fib[1] = 1 
             Fib[6]", "8"),
             ("Subst[b=a, b+a]", "2*a"),
+            ("(a+b+c)^2", "2*a*b+2*a*c+2*b*c+a^2+b^2+c^2"),
             ("a = 7
             b = Negate[4] 
             a + b", "3"),
-            ("(a+b+c)^2", "2*a*b+2*a*c+2*b*c+a^2+b^2+c^2"),
             ("(x+2)^7", "128+2*x^6+12*x^5+12*x^6+16*x^3+16*x^5+24*x^4+24*x^5+32*x^2+32*x^3+32*x^5+128*x^2+256*x^4+448*x+512*x^2+512*x^3+x^7")
         ];
         for (input, expected_result) in test_cases {
