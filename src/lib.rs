@@ -182,7 +182,7 @@ fn match_and_bind(expr: &Value, rule: &Rule, env: &Env) -> Result<Option<Value>>
     // substitute bindings from matching into either an intrinsic or the output of the rule
     if let Some(bindings) = go(expr, &rule.condition, env, &HashMap::new())? {
         Ok(Some(match &rule.result {
-            RuleResult::Intrinsic(id) => env.intrinsics.get(id).unwrap()(&bindings).with_context(|| format!("applying intrinsic {}", id))?,
+            RuleResult::Intrinsic(id) => (env.intrinsics)(*id, &bindings).with_context(|| format!("applying intrinsic {}", id))?,
             RuleResult::Exp(e) => e.subst(&bindings)
         }))
     } else {
@@ -194,7 +194,7 @@ fn match_and_bind(expr: &Value, rule: &Rule, env: &Env) -> Result<Option<Value>>
 fn canonical_sort(v: &mut Value, env: &Env) -> Result<()> {
     match v {
         Value::Call(head, args) => if env.get_op(head).commutative {
-            args.sort_by(|a, b| a.get_hash().cmp(&b.get_hash()));
+            args.sort_by(|a, b| a.partial_cmp(b).unwrap());
         },
         _ => ()
     }
@@ -308,6 +308,28 @@ fn wrap_binop_no_exact<F: 'static + Fn(Interval, Interval) -> Result<Interval> +
     })
 }
 
+fn run_intrinsic(id: usize, args: &HashMap<InlinableString, Value>) -> Result<Value> {
+    match id {
+        0 => wrap_binop(|a, b| Ok(a + b), |a, b| Ok(a + b))(args),
+        1 => wrap_binop(|a, b| Ok(a - b), |a, b| Ok(a - b))(args),
+        2 => wrap_binop(|a, b| Ok(a * b), |a, b| Ok(a * b))(args),
+        3 => wrap_binop_no_exact(|a, b| Ok(a / b))(args),
+        4 => wrap_binop(|a, b| a.pow(b), |a, b| a.checked_pow(b.try_into()?).context("integer overflow"))(args),
+        5 => {
+            // Substitute a single, given binding var=value into a target expression
+            let var = args.get(&InlinableString::from("var")).unwrap();
+            let value = args.get(&InlinableString::from("value")).unwrap();
+            let target = args.get(&InlinableString::from("target")).unwrap();
+            let name = var.assert_ident("Subst")?;
+            let mut new_bindings = HashMap::new();
+            new_bindings.insert(name, value.clone());
+            Ok(target.subst(&new_bindings))
+        },
+        6 => wrap_binop(|_a, _b| bail!("no modulo on floats yet"), |a, b| a.checked_rem(b).context("division by zero"))(args),
+        _ => bail!("invalid intrinsic id {}", id)
+    }
+}
+
 // Provides a basic environment with operator commutativity/associativity operations and intrinsics.
 fn make_initial_env() -> Env {
     let mut ops = HashMap::new();
@@ -319,24 +341,7 @@ fn make_initial_env() -> Env {
     ops.insert(InlinableString::from("="), Operation { commutative: false, associative: false });
     ops.insert(InlinableString::from("#"), Operation { commutative: false, associative: true });
     let ops = Arc::new(ops);
-    let mut intrinsics = HashMap::new();
-    intrinsics.insert(0, wrap_binop(|a, b| Ok(a + b), |a, b| Ok(a + b)));
-    intrinsics.insert(1, wrap_binop(|a, b| Ok(a - b), |a, b| Ok(a - b)));
-    intrinsics.insert(2, wrap_binop(|a, b| Ok(a * b), |a, b| Ok(a * b)));
-    intrinsics.insert(3, wrap_binop_no_exact(|a, b| Ok(a / b)));
-    intrinsics.insert(4, wrap_binop(|a, b| a.pow(b), |a, b| a.checked_pow(b.try_into()?).context("integer overflow")));
-    intrinsics.insert(5, Box::new(|bindings| {
-        // Substitute a single, given binding var=value into a target expression
-        let var = bindings.get(&InlinableString::from("var")).unwrap();
-        let value = bindings.get(&InlinableString::from("value")).unwrap();
-        let target = bindings.get(&InlinableString::from("target")).unwrap();
-        let name = var.assert_ident("Subst")?;
-        let mut new_bindings = HashMap::new();
-        new_bindings.insert(name, value.clone());
-        Ok(target.subst(&new_bindings))
-    }));
-    //intrinsics.insert(6, wrap_binop(|a, b| a.checked_rem(b).context("division by zero")));
-    let intrinsics = Arc::new(intrinsics);
+    let intrinsics = Arc::new(run_intrinsic);
     Env {
         ruleset: vec![],
         ops: ops.clone(),

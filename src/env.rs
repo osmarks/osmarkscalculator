@@ -26,7 +26,7 @@ pub struct Operation {
 pub type Bindings = HashMap<InlinableString, Value>;
 pub type Ops = HashMap<InlinableString, Operation>;
 pub type Ruleset = HashMap<InlinableString, Vec<Rule>>;
-pub type Intrinsics = HashMap<usize, Box<dyn Fn(&Bindings) -> Result<Value> + Sync + Send>>;
+pub type Intrinsics = dyn Fn(usize, &Bindings) -> Result<Value> + Sync + Send;
 
 #[derive(Clone)]
 pub struct Env {
