@@ -17,7 +17,7 @@ pub struct Rule {
     pub result: RuleResult,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Operation {
     pub commutative: bool,
     pub associative: bool,

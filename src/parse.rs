@@ -10,7 +10,15 @@ pub enum Token { Number(InlinableString), OpenBracket, CloseBracket, Op(char), E
 enum LexState {
     Number(InlinableString),
     Identifier(InlinableString),
-    None
+    None,
+    Quote
+}
+
+pub fn is_special_character(c: char) -> bool {
+    match c {
+        '#' | '+' | '(' | ')' | '-' | '/' | '*' | '^' | '=' | '[' | ']' | ',' => true,
+        _ => false
+    }
 }
 
 // lexer
@@ -30,20 +38,29 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 n.push(char);
                 LexState::Number(n)
             },
+            // Allow quoting special characters
+            ('`', LexState::None) => {
+                LexState::Quote
+            },
             // if special character seen, commit existing state and push operator/bracket/comma token
-            ('#' | '+' | '(' | ')' | '-' | '/' | '*' | '^' | '=' | '[' | ']' | ',', state) => {
-                match state {
-                    LexState::Number(s) => toks.push(Token::Number(s)),
-                    LexState::Identifier(s) => toks.push(Token::Identifier(s)),
-                    _ => ()
-                };
-                toks.push(match char {
-                    '(' => Token::OpenBracket, ')' => Token::CloseBracket,
-                    '[' => Token::OpenSqBracket, ']' => Token::CloseSqBracket,
-                    ',' => Token::Comma,
-                    a => Token::Op(a)
-                });
-                LexState::None  
+            (c, state) if is_special_character(c) => {
+                if let LexState::Quote = state {
+                    toks.push(Token::Identifier(char_to_string(char)));
+                    LexState::None
+                } else {
+                    match state {
+                        LexState::Number(s) => toks.push(Token::Number(s)),
+                        LexState::Identifier(s) => toks.push(Token::Identifier(s)),
+                        _ => ()
+                    };
+                    toks.push(match char {
+                        '(' => Token::OpenBracket, ')' => Token::CloseBracket,
+                        '[' => Token::OpenSqBracket, ']' => Token::CloseSqBracket,
+                        ',' => Token::Comma,
+                        a => Token::Op(a)
+                    });
+                    LexState::None  
+                }
             },
             // semicolon or newline is break
             (';' | '\n', state) => {

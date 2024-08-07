@@ -230,6 +230,11 @@ fn flatten_tree(v: &mut Value, env: &Env) -> Result<()> {
                     }
                 }
             }
+            /*
+            for child in args.iter_mut() {
+                flatten_tree(child, env)?;
+            }
+            */
             // Also do sorting after flattening, to avoid any weirdness with ordering.
             canonical_sort(v, env)?;
             return Ok(())
@@ -419,7 +424,6 @@ x^n/x = x^(n-1)
 (a*x^n)/x = a*x^(n-1)
 PushRuleset[factor_postpostprocess]
 ";
-
 
 pub struct ImperativeCtx {
     bindings: Bindings,

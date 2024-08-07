@@ -5,7 +5,7 @@ use std::fmt::{self, Write};
 use itertools::Itertools;
 use anyhow::{Result, anyhow};
 
-use crate::parse::{Ast, precedence};
+use crate::parse::{Ast, precedence, is_special_character};
 use crate::env::{Env, Bindings};
 use crate::util::char_to_string;
 use crate::interval_arithmetic::Interval;
@@ -179,7 +179,16 @@ impl Value {
                 Value::ExactNum(x) => if *x >= 0 {
                     write!(f, "{}", x)
                 } else { write!(f, "Negate[{}]", -x) },
-                Value::Identifier(i) => write!(f, "{}", i),
+                Value::Identifier(i) => {
+                    for c in i.chars() {
+                        if is_special_character(c) {
+                            write!(f, "`{}", c)?;
+                        } else {
+                            write!(f, "{}", c)?;
+                        }
+                    }
+                    Ok(())
+                },
                 Value::Call(head, args) => {
                     match env.ops.get(head) {
                         Some(_) => {
